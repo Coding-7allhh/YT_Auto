@@ -84,7 +84,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ffmpeg \
-            
+            gdown \
             git \
             curl \
             jq \
