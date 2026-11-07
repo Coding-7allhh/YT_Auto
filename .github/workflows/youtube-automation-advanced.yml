@@ -49,10 +49,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version || '3.11' }}
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            **/requirements.txt
+          # Caching is disabled because this repository may not contain
+          # requirements.txt or pyproject.toml. This prevents setup-python
+          # from failing while searching for a dependency lock/manifest file.
 
       - name: Prepare Colab-compatible folders and permissions
         shell: bash
