@@ -1,0 +1,274 @@
+name: Analyze and Run Parts 2-5
+
+on:
+  workflow_dispatch:
+    inputs:
+      notebook_dir:
+        description: "Folder containing Part_2 to Part_5 notebooks (use . for repository root)"
+        required: true
+        default: "."
+        type: string
+      python_version:
+        description: "Python version"
+        required: true
+        default: "3.11"
+        type: string
+  push:
+    paths:
+      - "**.ipynb"
+      - ".github/workflows/**"
+      - "requirements.txt"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: youtube-automation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  analyze-and-run:
+    name: Analyze and run Parts 2-5
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      MPLBACKEND: "Agg"
+      WORK_DIR: ${{ github.workspace }}
+      NOTEBOOK_DIR: ${{ inputs.notebook_dir || '.' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version || '3.11' }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            **/requirements.txt
+
+      - name: Prepare Colab-compatible folders and permissions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # GitHub-hosted runners do not create Colab's /content directory.
+          sudo mkdir -p /content
+          sudo chown -R "$USER":"$(id -gn)" /content
+          mkdir -p \
+            "$GITHUB_WORKSPACE/input" \
+            "$GITHUB_WORKSPACE/output" \
+            "$GITHUB_WORKSPACE/temp" \
+            "$GITHUB_WORKSPACE/logs" \
+            "$GITHUB_WORKSPACE/executed"
+          chmod -R u+rwX "$GITHUB_WORKSPACE"
+          {
+            echo "CONTENT_DIR=/content"
+            echo "INPUT_DIR=$GITHUB_WORKSPACE/input"
+            echo "OUTPUT_DIR=$GITHUB_WORKSPACE/output"
+            echo "TEMP_DIR=$GITHUB_WORKSPACE/temp"
+          } >> "$GITHUB_ENV"
+          echo "Runner user: $USER"
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "Python: $(python --version)"
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            git \
+            curl \
+            jq \
+            mediainfo \
+            libgl1 \
+            libglib2.0-0 \
+            libsm6 \
+            libxext6 \
+            libxrender1
+          ffmpeg -version | head -n 2
+          ffprobe -version | head -n 1
+          mediainfo --Version | head -n 1
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m pip install --upgrade pip setuptools wheel
+          if [[ -f requirements.txt ]]; then
+            python -m pip install -r requirements.txt
+          fi
+          # Install notebook execution tools even if the project has no requirements file.
+          python -m pip install \
+            jupyter \
+            nbconvert \
+            nbformat \
+            ipykernel \
+            papermill \
+            pillow
+          python -m ipykernel install --user --name youtube-automation --display-name "Python (YouTube Automation)"
+
+      - name: Analyze repository and locate Parts 2-5
+        id: analyze
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["GITHUB_WORKSPACE"])
+          requested = Path(os.environ.get("NOTEBOOK_DIR", "."))
+          base = (root / requested).resolve()
+          if not base.exists() or not base.is_dir():
+              raise SystemExit(f"Notebook directory does not exist: {base}")
+
+          print(f"Repository: {root}")
+          print(f"Notebook search directory: {base}")
+          print("Top-level files:")
+          for p in sorted(base.iterdir())[:80]:
+              print(f"  {'DIR ' if p.is_dir() else 'FILE'} {p.name}")
+
+          found = {}
+          for part in range(2, 6):
+              matches = sorted(
+                  p for p in base.rglob("*.ipynb")
+                  if p.is_file()
+                  and f"part_{part}" in p.stem.lower().replace("-", "_").replace(" ", "_")
+                  and ".ipynb_checkpoints" not in str(p)
+              )
+              if not matches:
+                  raise SystemExit(
+                      f"Part {part} notebook not found under {base}. "
+                      "Expected a filename such as Part_2.ipynb."
+                  )
+              found[part] = matches[0]
+              print(f"Part {part}: {matches[0].relative_to(root)}")
+              if len(matches) > 1:
+                  print("  Additional matches (not selected):")
+                  for extra in matches[1:]:
+                      print(f"    {extra.relative_to(root)}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              for part, path in found.items():
+                  out.write(f"part{part}={path}\n")
+          PY
+
+      - name: Validate optional secrets and runtime configuration
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -Eeuo pipefail
+          for key in DISCORD_WEBHOOK_URL DISCORD_BOT_TOKEN OPENAI_API_KEY; do
+            if [[ -n "${!key:-}" ]]; then
+              echo "$key: configured"
+            else
+              echo "$key: not configured (optional at workflow level)"
+            fi
+          done
+          # Export only configured values to later notebook steps.
+          {
+            [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] || echo "DISCORD_WEBHOOK_URL=$DISCORD_WEBHOOK_URL"
+            [[ -z "${DISCORD_BOT_TOKEN:-}" ]] || echo "DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN"
+            [[ -z "${OPENAI_API_KEY:-}" ]] || echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+          } >> "$GITHUB_ENV"
+
+      - name: Run Part 2 - Long video clipping
+        shell: bash
+        env:
+          NOTEBOOK: ${{ steps.analyze.outputs.part2 }}
+        run: |
+          set -Eeuo pipefail
+          jupyter nbconvert --to notebook --execute "$NOTEBOOK" \
+            --output "Part_2_executed.ipynb" \
+            --output-dir "$GITHUB_WORKSPACE/executed" \
+            --ExecutePreprocessor.timeout=-1 \
+            --ExecutePreprocessor.kernel_name=python3 \
+            --ExecutePreprocessor.cwd="$GITHUB_WORKSPACE" \
+            2>&1 | tee "$GITHUB_WORKSPACE/logs/part2.log"
+
+      - name: Run Part 3 - Vertical video rendering
+        shell: bash
+        env:
+          NOTEBOOK: ${{ steps.analyze.outputs.part3 }}
+        run: |
+          set -Eeuo pipefail
+          jupyter nbconvert --to notebook --execute "$NOTEBOOK" \
+            --output "Part_3_executed.ipynb" \
+            --output-dir "$GITHUB_WORKSPACE/executed" \
+            --ExecutePreprocessor.timeout=-1 \
+            --ExecutePreprocessor.kernel_name=python3 \
+            --ExecutePreprocessor.cwd="$GITHUB_WORKSPACE" \
+            2>&1 | tee "$GITHUB_WORKSPACE/logs/part3.log"
+
+      - name: Run Part 4 - AI metadata and thumbnails
+        shell: bash
+        env:
+          NOTEBOOK: ${{ steps.analyze.outputs.part4 }}
+        run: |
+          set -Eeuo pipefail
+          jupyter nbconvert --to notebook --execute "$NOTEBOOK" \
+            --output "Part_4_executed.ipynb" \
+            --output-dir "$GITHUB_WORKSPACE/executed" \
+            --ExecutePreprocessor.timeout=-1 \
+            --ExecutePreprocessor.kernel_name=python3 \
+            --ExecutePreprocessor.cwd="$GITHUB_WORKSPACE" \
+            2>&1 | tee "$GITHUB_WORKSPACE/logs/part4.log"
+
+      - name: Run Part 5 - Final processing
+        shell: bash
+        env:
+          NOTEBOOK: ${{ steps.analyze.outputs.part5 }}
+        run: |
+          set -Eeuo pipefail
+          jupyter nbconvert --to notebook --execute "$NOTEBOOK" \
+            --output "Part_5_executed.ipynb" \
+            --output-dir "$GITHUB_WORKSPACE/executed" \
+            --ExecutePreprocessor.timeout=-1 \
+            --ExecutePreprocessor.kernel_name=python3 \
+            --ExecutePreprocessor.cwd="$GITHUB_WORKSPACE" \
+            2>&1 | tee "$GITHUB_WORKSPACE/logs/part5.log"
+
+      - name: Generate run summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## YouTube automation run"
+            echo ""
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+            echo "- Runner: \`${RUNNER_OS}\`"
+            echo "- Python: \`$(python --version 2>&1 || true)\`"
+            echo "- FFmpeg: \`$(ffmpeg -version 2>&1 | head -n 1 || true)\`"
+            echo ""
+            echo "### Notebook logs"
+            for f in "$GITHUB_WORKSPACE"/logs/part*.log; do
+              [[ -f "$f" ]] || continue
+              echo "- \`$(basename "$f")\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload execution logs and executed notebooks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-automation-diagnostics-${{ github.run_number }}
+          path: |
+            logs/
+            executed/
+            output/
+          if-no-files-found: warn
+          retention-days: 5
+          compression-level: 0
